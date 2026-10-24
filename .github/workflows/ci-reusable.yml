@@ -1,0 +1,116 @@
+name: CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      preview_url:
+        description: Vercel preview URL, passed when triggered by deployment_status
+        required: false
+        type: string
+
+jobs:
+  gate-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse PRs that mix protected paths with product code
+        run: |
+          BASE="origin/${{ github.event.pull_request.base.ref }}"
+          git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=1 || true
+          PROTECTED='^(\.github/|e2e/|supabase/policies/|supabase/tests/|CODEOWNERS$|perf-budget\.json$)'
+          CHANGED=$(git diff --name-only "$BASE"...HEAD)
+          echo "Changed files:"; echo "$CHANGED"
+          P=$(echo "$CHANGED" | grep -E "$PROTECTED" || true)
+          O=$(echo "$CHANGED" | grep -vE "$PROTECTED" || true)
+          if [ -n "$P" ] && [ -n "$O" ]; then
+            echo "::error::This PR changes gate files and product code together. Split it."
+            echo "Gate files:"; echo "$P"
+            exit 1
+          fi
+
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+  typecheck:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+
+  lint:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run lint
+
+  unit:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run test:unit
+
+  isolation:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - name: Cross-account data isolation
+        run: npm run test:isolation
+      - name: Refuse service-role keys in client bundles
+        run: |
+          npm run build
+          if grep -rIl --exclude-dir=node_modules -E 'service_role|SUPABASE_SERVICE' dist/ .expo/ 2>/dev/null; then
+            echo "::error::A service-role key reached a client bundle."
+            exit 1
+          fi
+
+  e2e:
+    needs: [typecheck, lint, unit, isolation]
+    if: inputs.preview_url != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
+        env:
+          BASE_URL: ${{ inputs.preview_url }}
+
+  perf:
+    needs: [typecheck, lint, unit, isolation]
+    if: inputs.preview_url != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run perf:check
+        env:
+          BASE_URL: ${{ inputs.preview_url }}
