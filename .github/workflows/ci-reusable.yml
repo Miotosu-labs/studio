@@ -117,7 +117,7 @@ jobs:
           cache: ${{ inputs.package-manager }}
       - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
       - name: Cross-account data isolation
-        run: ${{ inputs.package-manager }} run test:isolation --if-present
+        run: ${{ inputs.package-manager }} run --if-present test:isolation
       - name: Build
         run: |
           if [ -n "$BUILD_ENV" ]; then
