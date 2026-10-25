@@ -7,6 +7,26 @@ on:
         description: Vercel preview URL, passed when triggered by deployment_status
         required: false
         type: string
+      package-manager:
+        description: "Package manager: npm or pnpm"
+        required: false
+        type: string
+        default: npm
+      build-dir:
+        description: Build output directory to validate
+        required: false
+        type: string
+        default: dist
+      scan-dir:
+        description: Directory to scan for leaked secrets (defaults to build-dir)
+        required: false
+        type: string
+        default: ""
+      build-env:
+        description: "Newline-separated KEY=dummy pairs exported before the build step"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   gate-guard:
@@ -34,57 +54,84 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm'
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-      - run: npm ci
+          cache: ${{ inputs.package-manager }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
 
   typecheck:
     needs: install
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm'
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run typecheck
+        with:
+          node-version: 20
+          cache: ${{ inputs.package-manager }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager }} run typecheck
 
   lint:
     needs: install
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm'
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run lint
+        with:
+          node-version: 20
+          cache: ${{ inputs.package-manager }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager }} run lint
 
   unit:
     needs: install
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm'
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run test:unit
+        with:
+          node-version: 20
+          cache: ${{ inputs.package-manager }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager }} run test:unit
 
   isolation:
     needs: install
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm'
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
+        with:
+          node-version: 20
+          cache: ${{ inputs.package-manager }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
       - name: Cross-account data isolation
-        run: npm run test:isolation
+        run: ${{ inputs.package-manager }} run test:isolation --if-present
       - name: Build
-        run: npm run build
+        run: |
+          if [ -n "$BUILD_ENV" ]; then
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              export "$line"
+            done <<< "$BUILD_ENV"
+          fi
+          ${{ inputs.package-manager }} run build
+        env:
+          BUILD_ENV: ${{ inputs.build-env }}
       - name: Verify build output is real
         run: |
-          DIR=dist
+          DIR="${{ inputs.build-dir }}"
           if [ ! -d "$DIR" ]; then
             echo "::error::$DIR does not exist - build produced nothing"
             exit 1
@@ -98,7 +145,8 @@ jobs:
           fi
       - name: Refuse service-role keys in client bundles
         run: |
-          for d in dist .expo; do
+          SCAN="${{ inputs.scan-dir || inputs.build-dir }}"
+          for d in "$SCAN" .expo; do
             [ -d "$d" ] || continue
             grep -rhoE 'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+' "$d" | sort -u > jwts.txt
             while read -r T; do
@@ -122,9 +170,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm'
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
+        with:
+          node-version: 20
+          cache: ${{ inputs.package-manager }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test
         env:
@@ -136,9 +188,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm'
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run perf:check
+        with:
+          node-version: 20
+          cache: ${{ inputs.package-manager }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager }} run perf:check
         env:
           BASE_URL: ${{ inputs.preview_url }}
