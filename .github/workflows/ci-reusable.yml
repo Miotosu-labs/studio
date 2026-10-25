@@ -35,6 +35,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Enforce conventional PR title
+        if: github.event.pull_request.title != ''
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          PATTERN='^(feat|fix|docs|chore|refactor|test|perf)(\([a-z0-9-]+(,[a-z0-9-]+)*\))?!?: .+'
+          if ! echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "::error::Bad PR title: \"$PR_TITLE\""
+            echo "Expected: type(scope): summary"
+            echo "Types: feat, fix, docs, chore, refactor, test, perf"
+            echo "Example: feat(web): add portfolio comparison view"
+            exit 1
+          fi
       - name: Refuse PRs that mix protected paths with product code
         run: |
           BASE="origin/${{ github.event.pull_request.base.ref }}"
