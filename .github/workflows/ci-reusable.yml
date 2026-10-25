@@ -83,6 +83,9 @@ jobs:
       - name: Refuse service-role keys in client bundles
         run: |
           npm run build
+          for d in dist .expo; do
+            [ -d "$d" ] || { echo "::error::$d missing, secret scan cannot run"; exit 1; }
+          done
           if grep -rIl --exclude-dir=node_modules -E 'service_role|SUPABASE_SERVICE' dist/ .expo/ 2>/dev/null; then
             echo "::error::A service-role key reached a client bundle."
             exit 1
