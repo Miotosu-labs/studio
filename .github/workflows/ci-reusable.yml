@@ -19,7 +19,7 @@ jobs:
         run: |
           BASE="origin/${{ github.event.pull_request.base.ref }}"
           git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=1 || true
-          PROTECTED='^(\.github/|e2e/|supabase/policies/|supabase/tests/|CODEOWNERS$|perf-budget\.json$)'
+          PROTECTED='^(\.github/|e2e/|supabase/policies/|supabase/tests/|CODEOWNERS$|perf-budget\.json$|AGENTS\.md$)'
           CHANGED=$(git diff --name-only "$BASE"...HEAD)
           echo "Changed files:"; echo "$CHANGED"
           P=$(echo "$CHANGED" | grep -E "$PROTECTED" || true)
