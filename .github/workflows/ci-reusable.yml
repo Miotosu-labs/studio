@@ -80,13 +80,37 @@ jobs:
       - run: npm ci
       - name: Cross-account data isolation
         run: npm run test:isolation
-      - name: Refuse service-role keys in client bundles
+      - name: Build
+        run: npm run build
+      - name: Verify build output is real
         run: |
-          npm run build
-          if grep -rIl --exclude-dir=node_modules -E 'service_role|SUPABASE_SERVICE' dist/ .expo/ 2>/dev/null; then
-            echo "::error::A service-role key reached a client bundle."
+          DIR=dist
+          if [ ! -d "$DIR" ]; then
+            echo "::error::$DIR does not exist - build produced nothing"
             exit 1
           fi
+          COUNT=$(find "$DIR" -type f | wc -l)
+          BYTES=$(du -sb "$DIR" | cut -f1)
+          echo "Build output: $COUNT files, $BYTES bytes"
+          if [ "$COUNT" -lt 5 ] || [ "$BYTES" -lt 10240 ]; then
+            echo "::error::$DIR has $COUNT files / $BYTES bytes - too small to be real"
+            exit 1
+          fi
+      - name: Refuse service-role keys in client bundles
+        run: |
+          for d in dist .expo; do
+            [ -d "$d" ] || continue
+            grep -rhoE 'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+' "$d" | sort -u > jwts.txt
+            while read -r T; do
+              P=$(printf '%s' "$T" | cut -d. -f2 | tr '_-' '/+')
+              case $(( ${#P} % 4 )) in 2) P="$P==" ;; 3) P="$P=" ;; esac
+              if printf '%s' "$P" | base64 -d 2>/dev/null | grep -q 'service_role'; then
+                echo "::error::service_role JWT found in the shipped bundle"
+                exit 1
+              fi
+            done < jwts.txt
+            rm -f jwts.txt
+          done
 
   e2e:
     needs: [typecheck, lint, unit, isolation]
