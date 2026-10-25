@@ -110,6 +110,10 @@ jobs:
               fi
             done < jwts.txt
             rm -f jwts.txt
+            if grep -rqE 'sb_secret_[A-Za-z0-9_-]{10,}' "$d"; then
+              echo "::error::A sb_secret_ key is in the shipped bundle."
+              exit 1
+            fi
           done
 
   e2e:
