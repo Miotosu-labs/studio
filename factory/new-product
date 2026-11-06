@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# new-product: set up a new product repo for the factory in one go.
+#
+#   new-product <short-name> "<Linear project name>"
+#   e.g. new-product pegy "PEGY Alerts"
+#
+# Runs on Tom's Mac (needs `gh` logged in as the org owner, never on the agent box).
+# What it does:
+#   1. creates miotosu-labs/product-<short-name> from miotosu-labs/template (private)
+#      (the org ruleset protects it automatically because the name starts with product-)
+#   2. sets squash-only merges with the PR title as the commit title
+#   3. adds the repo to the Cyrus GitHub App and the Linear GitHub app
+#   4. on the Cyrus box: clones it and adds the routing entry (Cyrus reloads by itself)
+#   5. creates the Linear project if LINEAR_API_KEY is set and it doesn't exist yet
+# Safe to run twice: every step skips what already exists.
+set -euo pipefail
+
+ORG="miotosu-labs"
+TEMPLATE="template"
+CYRUS_INSTALLATION_ID="174947436"
+LINEAR_TEAM_ID="335f9d87-f084-4179-9436-2f3bcbee91b8"
+# How to run a command on the Cyrus box. Override if you reach it differently,
+# e.g. BOX="ssh homeserver incus exec cyrus-agent --" new-product ...
+BOX="${BOX:-incus exec cyrus-agent --}"
+
+say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
+fail() { printf '\nSTOPPED: %s\n' "$*" >&2; exit 1; }
+
+[ $# -eq 2 ] || fail 'usage: new-product <short-name> "<Linear project name>"'
+SHORT="$1"; PROJECT="$2"
+[[ "$SHORT" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "short name must be lowercase letters, digits and dashes"
+REPO="product-$SHORT"
+
+say "0/5 Checks"
+command -v gh >/dev/null || fail "gh is not installed"
+command -v jq >/dev/null || fail "jq is not installed (brew install jq)"
+gh auth status >/dev/null 2>&1 || fail "gh is not logged in (run: gh auth login)"
+ROLE=$(gh api "orgs/$ORG/memberships/$(gh api user --jq .login)" --jq .role 2>/dev/null || true)
+[ "$ROLE" = "admin" ] || fail "your gh login is not an owner of $ORG"
+$BOX true 2>/dev/null || fail "can't reach the Cyrus box with: $BOX  (set BOX=... and retry)"
+echo "ok"
+
+say "1/5 Repo $ORG/$REPO"
+if gh api "repos/$ORG/$REPO" >/dev/null 2>&1; then
+  echo "already exists, skipping"
+else
+  gh repo create "$ORG/$REPO" --private --template "$ORG/$TEMPLATE" >/dev/null
+  echo -n "created, waiting for template copy"
+  for _ in $(seq 1 30); do
+    gh api "repos/$ORG/$REPO/commits?per_page=1" >/dev/null 2>&1 && break
+    echo -n "."; sleep 2
+  done
+  echo
+fi
+REPO_ID=$(gh api "repos/$ORG/$REPO" --jq .id)
+
+say "2/5 Merge settings (squash only, PR title becomes the commit title)"
+gh api -X PATCH "repos/$ORG/$REPO" \
+  -F allow_squash_merge=true -F allow_merge_commit=false -F allow_rebase_merge=false \
+  -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY \
+  -F delete_branch_on_merge=true -F allow_auto_merge=false >/dev/null
+echo "ok"
+
+say "3/5 GitHub apps"
+INSTALLS=$(gh api /user/installations --paginate \
+  --jq ".installations[] | select(.account.login==\"$ORG\") | [.id, .app_slug, .repository_selection] | @tsv")
+add_to() { # id name
+  gh api -X PUT "/user/installations/$1/repositories/$REPO_ID" >/dev/null && echo "added to $2"
+}
+add_to "$CYRUS_INSTALLATION_ID" "Cyrus Agent"
+LINEAR_FOUND=0
+while IFS=$'\t' read -r id slug sel; do
+  [[ "$slug" == *linear* ]] || continue
+  LINEAR_FOUND=1
+  if [ "$sel" = "all" ]; then echo "$slug already covers all repos"; else add_to "$id" "$slug"; fi
+done <<< "$INSTALLS"
+[ "$LINEAR_FOUND" = 1 ] || echo "WARNING: no Linear GitHub app found on $ORG; add the repo to it by hand"
+
+say "4/5 Cyrus box: clone and routing"
+$BOX bash -s -- "$ORG" "$REPO" "$PROJECT" <<'BOXSCRIPT'
+set -euo pipefail
+ORG="$1"; REPO="$2"; PROJECT="$3"
+CONFIG=/home/cyrus/.cyrus/config.json
+[ -f "$CONFIG" ] || { echo "no $CONFIG on the box"; exit 1; }
+cp "$CONFIG" "$CONFIG.bak-$(date +%Y%m%d-%H%M%S)"
+# Work out where repos live from the template entry, then clone next to it.
+DEST=$(node -e '
+  const c=require(process.argv[1]);
+  const t=c.repositories.find(r=>r.name==="template"||(r.githubUrl||"").endsWith("/template")||(r.repositoryPath||"").endsWith("/template"));
+  if(!t){console.error("no template entry in config");process.exit(1)}
+  console.log(require("path").dirname(t.repositoryPath)+"/"+process.argv[2]);
+' "$CONFIG" "$REPO")
+if [ -d "$DEST/.git" ]; then
+  echo "already cloned at $DEST"
+else
+  runuser -u cyrus -- git clone -q "https://github.com/$ORG/$REPO.git" "$DEST"
+  echo "cloned to $DEST"
+fi
+runuser -u cyrus -- git -C "$DEST" fetch -q origin && echo "fetch works"
+# Add or update the routing entry. Written in place so Cyrus' file watcher reloads it.
+node -e '
+  const fs=require("fs"),path=require("path"),crypto=require("crypto");
+  const [cfgPath,org,repo,project,dest]=process.argv.slice(1);
+  const c=JSON.parse(fs.readFileSync(cfgPath,"utf8"));
+  const t=c.repositories.find(r=>r.name==="template"||(r.githubUrl||"").endsWith("/template")||(r.repositoryPath||"").endsWith("/template"));
+  let e=c.repositories.find(r=>r.name===repo);
+  if(e){ e.projectKeys=[project]; console.log("routing entry existed, project set to: "+project); }
+  else {
+    e=JSON.parse(JSON.stringify(t));
+    e.id=crypto.randomUUID(); e.name=repo; e.repositoryPath=dest;
+    e.githubUrl="https://github.com/"+org+"/"+repo;
+    e.workspaceBaseDir=(t.workspaceBaseDir||path.dirname(dest)+"/worktrees/template").split("template").join(repo);
+    e.projectKeys=[project]; delete e.teamKeys; delete e.routingLabels;
+    c.repositories.push(e); console.log("routing entry added: Linear project \""+project+"\" -> "+repo);
+  }
+  // Planner and orchestrator modes, on top of whatever the template entry had.
+  e.labelPrompts=Object.assign({},e.labelPrompts,{scoper:["Plan"],orchestrator:["Orchestrator"]});
+  fs.writeFileSync(cfgPath+".new",JSON.stringify(c,null,2));
+' "$CONFIG" "$ORG" "$REPO" "$PROJECT" "$DEST"
+cat "$CONFIG.new" > "$CONFIG" && rm "$CONFIG.new"
+chown cyrus:cyrus "$CONFIG"
+mkdir -p "$(node -e 'const c=require(process.argv[1]);console.log(c.repositories.find(r=>r.name===process.argv[2]).workspaceBaseDir)' "$CONFIG" "$REPO")"
+chown -R cyrus:cyrus "$(dirname "$DEST")/$REPO"
+sleep 3
+journalctl -u cyrus --since "-20s" --no-pager 2>/dev/null | grep -i -E "config|repositor" | tail -5 || true
+BOXSCRIPT
+
+say "5/5 Linear project \"$PROJECT\""
+if [ -z "${LINEAR_API_KEY:-}" ]; then
+  echo "LINEAR_API_KEY not set: make sure a Linear project named exactly \"$PROJECT\" exists"
+else
+  lin() { curl -sS https://api.linear.app/graphql -H "Authorization: $LINEAR_API_KEY" -H 'Content-Type: application/json' -d "$1"; }
+  EXISTS=$(lin "$(jq -nc --arg n "$PROJECT" '{query:"query($n:String!){projects(filter:{name:{eq:$n}}){nodes{id}}}",variables:{n:$n}}')" | jq '.data.projects.nodes|length')
+  if [ "$EXISTS" -gt 0 ]; then echo "already exists"
+  else
+    lin "$(jq -nc --arg n "$PROJECT" --arg t "$LINEAR_TEAM_ID" '{query:"mutation($n:String!,$t:String!){projectCreate(input:{name:$n,teamIds:[$t]}){success}}",variables:{n:$n,t:$t}}')" | jq -r '.data.projectCreate.success' | grep -q true && echo "created"
+  fi
+fi
+
+say "Done. $ORG/$REPO is live in the factory."
+echo "Note: Cyrus routes on the Linear project NAME. If you rename the project, rerun this command with the new name."
