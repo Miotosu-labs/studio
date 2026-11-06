@@ -76,9 +76,18 @@ say "3/5 GitHub apps"
 # (that one accepts admin:org) and print exact instructions when the write is
 # refused, rather than stopping the whole run.
 MANUAL=""
+# The only honest test of app access is whether the box can reach the repo:
+# its git token is minted from the Cyrus Agent installation.
+# stdin is closed on purpose: incus exec would otherwise swallow the input of
+# the loop that calls this, and the loop would end after the first app.
+box_can_see_repo() {
+  $BOX runuser -u cyrus -- git ls-remote "https://github.com/$ORG/$REPO.git" >/dev/null 2>&1 </dev/null
+}
 add_to() { # installation-id app-slug
   if gh api -X PUT "/user/installations/$1/repositories/$REPO_ID" >/dev/null 2>&1; then
     echo "added to $2"
+  elif box_can_see_repo; then
+    echo "$2: already has the repo (the box can reach it)"
   else
     echo "$2: GitHub will not let this login add the repo; you must do it by hand"
     MANUAL="$MANUAL$2
@@ -99,6 +108,18 @@ while IFS=$'\t' read -r id slug sel; do
 done <<< "$INSTALLS"
 [ "$CYRUS_FOUND" = 1 ] || echo "WARNING: installation $CYRUS_INSTALLATION_ID (Cyrus Agent) is not installed on $ORG"
 [ "$LINEAR_FOUND" = 1 ] || echo "WARNING: no Linear GitHub app found on $ORG; add the repo to it by hand"
+if [ -n "$MANUAL" ]; then
+  printf '\nSTOPPED: one thing needs you first.\n'
+  echo "Add $REPO to these GitHub apps by hand:"
+  printf '%s' "$MANUAL" | sed 's/^/  - /'
+  echo "Open:  https://github.com/organizations/$ORG/settings/installations"
+  echo "Click the app. Click Configure. Under Repository access choose"
+  echo "Select repositories. Add $REPO. Click Save."
+  echo
+  echo "Then run this command again. The box cannot clone $REPO until you do,"
+  echo "because its git login comes from that app."
+  exit 1
+fi
 
 say "4/5 Cyrus box: clone and routing"
 $BOX bash -s -- "$ORG" "$REPO" "$PROJECT" <<'BOXSCRIPT'
@@ -159,16 +180,6 @@ else
   else
     lin "$(jq -nc --arg n "$PROJECT" --arg t "$LINEAR_TEAM_ID" '{query:"mutation($n:String!,$t:String!){projectCreate(input:{name:$n,teamIds:[$t]}){success}}",variables:{n:$n,t:$t}}')" | jq -r '.data.projectCreate.success' | grep -q true && echo "created"
   fi
-fi
-
-if [ -n "$MANUAL" ]; then
-  say "ONE THING LEFT FOR YOU"
-  echo "Add $REPO to these GitHub apps by hand:"
-  printf '%s' "$MANUAL" | sed 's/^/  - /'
-  echo "Open:  https://github.com/organizations/$ORG/settings/installations"
-  echo "Click the app. Click Configure. Under Repository access choose"
-  echo "Select repositories. Add $REPO. Click Save."
-  echo "Until you do that, Cyrus cannot open pull requests in $REPO."
 fi
 
 say "Done. $ORG/$REPO is live in the factory."
