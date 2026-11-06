@@ -46,11 +46,19 @@ if gh api "repos/$ORG/$REPO" >/dev/null 2>&1; then
 else
   gh repo create "$ORG/$REPO" --private --template "$ORG/$TEMPLATE" >/dev/null
   echo -n "created, waiting for template copy"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     gh api "repos/$ORG/$REPO/commits?per_page=1" >/dev/null 2>&1 && break
     echo -n "."; sleep 2
   done
   echo
+  # GitHub sometimes creates the repo and never copies the template. The org
+  # ruleset guards the default branch from the moment the repo exists, so the
+  # files cannot be pushed in by hand. Say so instead of carrying on empty.
+  gh api "repos/$ORG/$REPO/commits?per_page=1" >/dev/null 2>&1 || fail \
+"GitHub created $ORG/$REPO but never copied $TEMPLATE into it.
+  The repo is empty and the ruleset blocks seeding it by hand.
+  Delete it and run this command again:
+    gh api -X DELETE repos/$ORG/$REPO"
 fi
 REPO_ID=$(gh api "repos/$ORG/$REPO" --jq .id)
 
@@ -62,18 +70,34 @@ gh api -X PATCH "repos/$ORG/$REPO" \
 echo "ok"
 
 say "3/5 GitHub apps"
-INSTALLS=$(gh api /user/installations --paginate \
-  --jq ".installations[] | select(.account.login==\"$ORG\") | [.id, .app_slug, .repository_selection] | @tsv")
-add_to() { # id name
-  gh api -X PUT "/user/installations/$1/repositories/$REPO_ID" >/dev/null && echo "added to $2"
+# A `gh auth login` token is an OAuth App token. GitHub refuses it for
+# /user/installations and for adding a repo to an app installation, even when
+# the login owns the org. So read the installations through the org endpoint
+# (that one accepts admin:org) and print exact instructions when the write is
+# refused, rather than stopping the whole run.
+MANUAL=""
+add_to() { # installation-id app-slug
+  if gh api -X PUT "/user/installations/$1/repositories/$REPO_ID" >/dev/null 2>&1; then
+    echo "added to $2"
+  else
+    echo "$2: GitHub will not let this login add the repo; you must do it by hand"
+    MANUAL="$MANUAL$2
+"
+  fi
 }
-add_to "$CYRUS_INSTALLATION_ID" "Cyrus Agent"
-LINEAR_FOUND=0
+INSTALLS=$(gh api "orgs/$ORG/installations" --paginate \
+  --jq '.installations[] | [.id, .app_slug, .repository_selection] | @tsv' 2>/dev/null || true)
+[ -n "$INSTALLS" ] || fail "cannot read the GitHub apps on $ORG (the login needs admin:org)"
+CYRUS_FOUND=0; LINEAR_FOUND=0
 while IFS=$'\t' read -r id slug sel; do
-  [[ "$slug" == *linear* ]] || continue
-  LINEAR_FOUND=1
+  [ -n "${id:-}" ] || continue
+  WANT=0
+  [ "$id" = "$CYRUS_INSTALLATION_ID" ] && { WANT=1; CYRUS_FOUND=1; }
+  case "$slug" in *linear*) WANT=1; LINEAR_FOUND=1 ;; esac
+  [ "$WANT" = 1 ] || continue
   if [ "$sel" = "all" ]; then echo "$slug already covers all repos"; else add_to "$id" "$slug"; fi
 done <<< "$INSTALLS"
+[ "$CYRUS_FOUND" = 1 ] || echo "WARNING: installation $CYRUS_INSTALLATION_ID (Cyrus Agent) is not installed on $ORG"
 [ "$LINEAR_FOUND" = 1 ] || echo "WARNING: no Linear GitHub app found on $ORG; add the repo to it by hand"
 
 say "4/5 Cyrus box: clone and routing"
@@ -135,6 +159,16 @@ else
   else
     lin "$(jq -nc --arg n "$PROJECT" --arg t "$LINEAR_TEAM_ID" '{query:"mutation($n:String!,$t:String!){projectCreate(input:{name:$n,teamIds:[$t]}){success}}",variables:{n:$n,t:$t}}')" | jq -r '.data.projectCreate.success' | grep -q true && echo "created"
   fi
+fi
+
+if [ -n "$MANUAL" ]; then
+  say "ONE THING LEFT FOR YOU"
+  echo "Add $REPO to these GitHub apps by hand:"
+  printf '%s' "$MANUAL" | sed 's/^/  - /'
+  echo "Open:  https://github.com/organizations/$ORG/settings/installations"
+  echo "Click the app. Click Configure. Under Repository access choose"
+  echo "Select repositories. Add $REPO. Click Save."
+  echo "Until you do that, Cyrus cannot open pull requests in $REPO."
 fi
 
 say "Done. $ORG/$REPO is live in the factory."
