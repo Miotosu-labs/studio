@@ -27,6 +27,11 @@ on:
         required: false
         type: string
         default: ""
+      allowed-deps:
+        description: "Comma- or space-separated runtime dependencies this product may use. Empty means none."
+        required: false
+        type: string
+        default: ""
 
 jobs:
   gate-guard:
@@ -62,6 +67,48 @@ jobs:
             echo "Gate files:"; echo "$P"
             exit 1
           fi
+      - name: Refuse source changes that carry no test
+        if: github.event.pull_request.number != ''
+        run: |
+          BASE="origin/${{ github.event.pull_request.base.ref }}"
+          TESTRE='(\.|-)(test|spec)\.[cm]?[tj]sx?$|(^|/)(__tests__|tests?)/'
+          CODERE='^src/.*\.[cm]?[tj]sx?$'
+          EXEMPTRE='\.d\.ts$|(^|/)types\.ts$'
+          CHANGED=$(git diff --name-only "$BASE"...HEAD)
+          CODE=$(echo "$CHANGED" | grep -E "$CODERE" | grep -vE "$TESTRE" | grep -vE "$EXEMPTRE" || true)
+          TESTS=$(echo "$CHANGED" | grep -E "$TESTRE" || true)
+          if [ -n "$CODE" ] && [ -z "$TESTS" ]; then
+            echo "::error::This PR changes source files and adds no test. Write a test for the behaviour you changed."
+            echo "Source files changed:"; echo "$CODE" | sed 's/^/    /'
+            echo "Exempt: *.d.ts and types.ts"
+            exit 1
+          fi
+          echo "OK: source changes carry test changes."
+      - name: Refuse a repository with no tests at all
+        run: |
+          TESTRE='(\.|-)(test|spec)\.[cm]?[tj]sx?$|(^|/)(__tests__|tests?)/'
+          ANY=$(git ls-files | grep -E "$TESTRE" || true)
+          if [ -z "$ANY" ]; then
+            echo "::error::This repository contains no test files. The unit check cannot prove anything."
+            exit 1
+          fi
+          echo "OK: $(echo "$ANY" | wc -l | tr -d ' ') test file(s) present."
+      - name: Refuse runtime dependencies that are not on the allowed list
+        env:
+          ALLOWED: ${{ inputs.allowed-deps }}
+        run: |
+          [ -f package.json ] || { echo "No package.json; nothing to check."; exit 0; }
+          DEPS=$(jq -r '.dependencies // {} | keys[]' package.json)
+          OK=$(printf '%s' "$ALLOWED" | tr ', ' '\n\n' | grep -v '^$' | sort -u)
+          BAD=""
+          for d in $DEPS; do echo "$OK" | grep -qxF "$d" || BAD="$BAD $d"; done
+          if [ -n "$BAD" ]; then
+            echo "::error::Runtime dependencies not on the allowed list:$BAD"
+            echo "Allowed for this product: ${ALLOWED:-(none)}"
+            echo "To allow a package, add it to allowed-deps in this repository's .github/workflows/ci.yml."
+            exit 1
+          fi
+          echo "OK: runtime dependencies are allowed (${DEPS:-none})."
 
   install:
     runs-on: ubuntu-latest
@@ -73,7 +120,7 @@ jobs:
         with:
           node-version: 20
           cache: ${{ inputs.package-manager }}
-      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile --ignore-scripts' || 'npm ci --ignore-scripts' }}
 
   typecheck:
     needs: install
@@ -86,7 +133,7 @@ jobs:
         with:
           node-version: 20
           cache: ${{ inputs.package-manager }}
-      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile --ignore-scripts' || 'npm ci --ignore-scripts' }}
       - run: ${{ inputs.package-manager }} run typecheck
 
   lint:
@@ -100,7 +147,7 @@ jobs:
         with:
           node-version: 20
           cache: ${{ inputs.package-manager }}
-      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile --ignore-scripts' || 'npm ci --ignore-scripts' }}
       - run: ${{ inputs.package-manager }} run lint
 
   unit:
@@ -114,7 +161,7 @@ jobs:
         with:
           node-version: 20
           cache: ${{ inputs.package-manager }}
-      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile --ignore-scripts' || 'npm ci --ignore-scripts' }}
       - run: ${{ inputs.package-manager }} run test:unit
 
   isolation:
@@ -128,7 +175,7 @@ jobs:
         with:
           node-version: 20
           cache: ${{ inputs.package-manager }}
-      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile --ignore-scripts' || 'npm ci --ignore-scripts' }}
       - name: Cross-account data isolation
         run: ${{ inputs.package-manager }} run --if-present test:isolation
       - name: Build
@@ -189,7 +236,7 @@ jobs:
         with:
           node-version: 20
           cache: ${{ inputs.package-manager }}
-      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile --ignore-scripts' || 'npm ci --ignore-scripts' }}
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test
         env:
@@ -207,7 +254,7 @@ jobs:
         with:
           node-version: 20
           cache: ${{ inputs.package-manager }}
-      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile --ignore-scripts' || 'npm ci --ignore-scripts' }}
       - run: ${{ inputs.package-manager }} run perf:check
         env:
           BASE_URL: ${{ inputs.preview_url }}
