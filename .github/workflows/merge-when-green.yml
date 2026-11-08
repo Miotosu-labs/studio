@@ -1,0 +1,52 @@
+name: Merge when green (reusable)
+
+# Squash-merges the pull request once every gate has passed.
+#
+# Call this as a SECOND job in a product's ci.yml, after the checks job, and
+# give it contents: write at the job level only:
+#
+#   jobs:
+#     checks:
+#       permissions: {contents: read}
+#       uses: miotosu-labs/studio/.github/workflows/ci-reusable.yml@vN
+#     merge:
+#       needs: [checks]
+#       permissions: {contents: write, pull-requests: write}
+#       uses: miotosu-labs/studio/.github/workflows/merge-when-green.yml@vN
+#
+# needs: [checks] means this never runs while a gate is red. GitHub enforces
+# the branch ruleset on the merge itself, so a stale branch or a missing check
+# is still refused. Nothing here can bypass a gate.
+#
+# This replaces GitHub auto-merge, which cannot be used: GITHUB_TOKEN is
+# forbidden from calling enablePullRequestAutoMerge, with or without
+# pull-requests: write. Proved on a real pull request on 8 Nov 2026.
+
+on:
+  workflow_call:
+
+jobs:
+  merge:
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Squash-merge this pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if OUT=$(gh pr merge "$PR" --repo "$REPO" --squash --delete-branch 2>&1); then
+            echo "Merged. $OUT"
+            exit 0
+          fi
+          echo "$OUT"
+          # A stale branch is the one refusal worth acting on. Update it; the
+          # checks re-run and the next pass merges.
+          if echo "$OUT" | grep -qi "not mergeable\|behind\|out of date\|Base branch was modified"; then
+            echo "Branch is behind main. Updating it so the checks re-run."
+            gh pr update-branch "$PR" --repo "$REPO" || true
+            echo "::notice::Updated this branch. It merges on the next green run."
+            exit 0
+          fi
+          echo "::warning::Could not merge. A person must look at this pull request."
