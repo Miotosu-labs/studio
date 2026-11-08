@@ -268,3 +268,27 @@ jobs:
       - run: ${{ inputs.package-manager }} run perf:check
         env:
           BASE_URL: ${{ inputs.preview_url }}
+
+  automerge:
+    # Deliberately not a required check. This job asks GitHub to merge the pull
+    # request as soon as every required check passes. The gates still decide:
+    # auto-merge waits for them and never bypasses one. If this job fails, the
+    # pull request simply stays open for a person to merge.
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Ask GitHub to merge this pull request when the checks pass
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --auto; then
+            echo "Auto-merge is on. This PR merges itself once the five checks pass."
+          else
+            echo "::warning::Could not turn on auto-merge. Merge this PR by hand."
+          fi
