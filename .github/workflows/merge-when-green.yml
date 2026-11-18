@@ -13,6 +13,7 @@ name: Merge when green (reusable)
 #       needs: [checks]
 #       permissions: {contents: write, pull-requests: write}
 #       uses: miotosu-labs/studio/.github/workflows/merge-when-green.yml@vN
+#       secrets: inherit
 #
 # needs: [checks] means this never runs while a gate is red. GitHub enforces
 # the branch ruleset on the merge itself, so a stale branch or a missing check
@@ -21,6 +22,12 @@ name: Merge when green (reusable)
 # This replaces GitHub auto-merge, which cannot be used: GITHUB_TOKEN is
 # forbidden from calling enablePullRequestAutoMerge, with or without
 # pull-requests: write. Proved on a real pull request on 8 Nov 2026.
+#
+# The merge and the branch update use a GitHub App token when the repo has the
+# MERGE_APP_ID and MERGE_APP_KEY secrets (THO-256). A merge made with
+# GITHUB_TOKEN starts no `push` run on main, so production never deploys, and
+# a branch update made with it starts no run that executes. Without the
+# secrets this falls back to GITHUB_TOKEN, which is how v10 behaved.
 
 on:
   workflow_call:
@@ -29,21 +36,38 @@ jobs:
   merge:
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    env:
+      HAS_APP: ${{ secrets.MERGE_APP_ID != '' && secrets.MERGE_APP_KEY != '' }}
     steps:
+      - name: Mint an app token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.MERGE_APP_ID }}
+          private-key: ${{ secrets.MERGE_APP_KEY }}
+
       - name: Squash-merge this pull request
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
+          [ "$HAS_APP" = true ] || echo "::notice::No MERGE_APP_ID secret. Using GITHUB_TOKEN, so this merge starts no push run on main."
           if OUT=$(gh pr merge "$PR" --repo "$REPO" --squash --delete-branch 2>&1); then
             echo "Merged. $OUT"
             exit 0
           fi
           echo "$OUT"
-          # A stale branch is the one refusal worth acting on. Update it; the
-          # checks re-run and the next pass merges.
-          if echo "$OUT" | grep -qi "not mergeable\|behind\|out of date\|Base branch was modified"; then
+          # A stale branch is the one refusal worth acting on. GitHub words it
+          # several ways, so retry on any of them, but only when the branch
+          # really is behind: another ruleset refusal must not loop forever.
+          if echo "$OUT" | grep -qiE "not mergeable|behind|out of date|Base branch was modified|required status checks are expected|Repository rule violations"; then
+            STATE=$(gh pr view "$PR" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)
+            if [ "$STATE" != "BEHIND" ]; then
+              echo "::warning::Merge was refused and the branch is not behind (state: $STATE). A person must look at this pull request."
+              exit 0
+            fi
             echo "Branch is behind main. Updating it so the checks re-run."
             gh pr update-branch "$PR" --repo "$REPO" || true
             echo "::notice::Updated this branch. It merges on the next green run."
