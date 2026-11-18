@@ -1,0 +1,78 @@
+name: Update behind (reusable)
+
+# Wakes every green pull request that has fallen behind main (THO-256).
+#
+# Call this from a product's ci.yml, on a push to main:
+#
+#   update-behind:
+#     if: github.event_name == 'push'
+#     permissions: {contents: write, pull-requests: write}
+#     uses: miotosu-labs/studio/.github/workflows/update-behind.yml@vN
+#     secrets: inherit
+#
+# A pull request can go green while main moves. Its merge job has already
+# finished, so nothing runs again. This updates its branch with a GitHub App
+# token, which starts a real pull_request run that ends in merge-when-green.
+# GITHUB_TOKEN cannot do this, so without MERGE_APP_ID and MERGE_APP_KEY the
+# job only lists the pull requests and changes nothing.
+#
+# A pull request with a red or unfinished check is left alone.
+
+on:
+  workflow_call:
+
+jobs:
+  update-behind:
+    runs-on: ubuntu-latest
+    env:
+      HAS_APP: ${{ secrets.MERGE_APP_ID != '' && secrets.MERGE_APP_KEY != '' }}
+    steps:
+      - name: Mint an app token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.MERGE_APP_ID }}
+          private-key: ${{ secrets.MERGE_APP_KEY }}
+
+      - name: Update every green pull request that is behind main
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          gh pr list --repo "$REPO" --state open --limit 200 \
+            --json number,isDraft,mergeStateStatus,statusCheckRollup > prs.json
+          # Green: at least one check, and every check finished with success,
+          # neutral or skipped. Pending, failed and action_required are not.
+          jq -r '
+            def checks: .statusCheckRollup // [];
+            def green:
+              if .__typename == "StatusContext" then .state == "SUCCESS"
+              else .status == "COMPLETED"
+                   and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")
+              end;
+            .[]
+            | select(.isDraft == false)
+            | select(.mergeStateStatus == "BEHIND")
+            | select((checks | length) > 0)
+            | select(all(checks[]; green))
+            | .number
+          ' prs.json > behind.txt
+          if [ ! -s behind.txt ]; then
+            echo "No green pull request is behind main."
+            exit 0
+          fi
+          echo "Green pull requests behind main:"; cat behind.txt
+          if [ "$HAS_APP" != true ]; then
+            echo "::warning::No MERGE_APP_ID secret. A branch update with GITHUB_TOKEN starts no run, so nothing was updated."
+            exit 0
+          fi
+          while read -r PR; do
+            [ -z "$PR" ] && continue
+            if gh pr update-branch "$PR" --repo "$REPO" < /dev/null; then
+              echo "::notice::Updated #$PR. Its checks re-run and it merges on green."
+            else
+              echo "::warning::Could not update #$PR. A person must look at it."
+            fi
+          done < behind.txt
