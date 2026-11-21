@@ -3,6 +3,11 @@ name: CI (reusable)
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: "Runner label for every job. Default: GitHub-hosted ubuntu-latest. Miotosu-labs products pass miotosu-runner (the incus-1 runner, THO-348)."
+        required: false
+        type: string
+        default: ubuntu-latest
       preview_url:
         description: Vercel preview URL, passed when triggered by deployment_status
         required: false
@@ -35,7 +40,7 @@ on:
 
 jobs:
   gate-guard:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,7 +126,7 @@ jobs:
           echo "OK: runtime dependencies are allowed (${DEPS:-none})."
 
   install:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -134,7 +139,7 @@ jobs:
 
   typecheck:
     needs: install
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -148,7 +153,7 @@ jobs:
 
   lint:
     needs: install
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -162,7 +167,7 @@ jobs:
 
   unit:
     needs: install
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -176,7 +181,7 @@ jobs:
 
   isolation:
     needs: install
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -237,7 +242,7 @@ jobs:
   e2e:
     needs: [typecheck, lint, unit, isolation]
     if: inputs.preview_url != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -255,7 +260,7 @@ jobs:
   perf:
     needs: [typecheck, lint, unit, isolation]
     if: inputs.preview_url != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
